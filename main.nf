@@ -52,6 +52,7 @@ if (params.help) {
     exit 0
 }
 
+
 /*
  * SET UP CONFIGURATION VARIABLES
  */
@@ -61,6 +62,9 @@ if (params.genomes && params.genome && !params.genomes.containsKey(params.genome
     exit 1, "The provided genome '${params.genome}' is not available in the iGenomes file. Currently the available genomes are ${params.genomes.keySet().join(", ")}"
 }
 
+
+
+
 // TODO nf-core: Add any reference files that are needed
 // Configurable reference genomes
 //
@@ -69,13 +73,18 @@ if (params.genomes && params.genome && !params.genomes.containsKey(params.genome
 //   input:
 //   file fasta from ch_fasta
 //
-params.fasta = params.genome ? params.genomes[ params.genome ].fasta ?: false : false
+params.fasta = "${params.genomes.GRCh38.bowtie2}genome.fa"
+params.bt_index = params.genome ? params.genomes[ params.genome ].bowtie2 ?: false : false
+println params.bt_index
+// params.fasta = params.genome ? params.genomes[ params.genome ].fasta ?: false : false
 if (params.fasta) { ch_fasta = file(params.fasta, checkIfExists: true) }
+
+
 
 // Has the run name been specified by the user?
 //  this has the bonus effect of catching both -name and --name
 custom_runName = params.name
-if (!(workflow.runName ==~ /[a-z]+_[a-z]+/)) {
+if (!(workflow.runName ==~ /[a-z]+_[ab -z]+/)) {
     custom_runName = workflow.runName
 }
 
@@ -102,7 +111,7 @@ if (params.readPaths) {
             .from(params.readPaths)
             .map { row -> [ row[0], [ file(row[1][0], checkIfExists: true) ] ] }
             .ifEmpty { exit 1, "params.readPaths was empty - no input files supplied" }
-            .into { ch_read_files_fastqc; ch_read_files_trimming }
+            .into { ch_read_files_fastqc; ch_read_files_trimming;  }
     } else {
         Channel
             .from(params.readPaths)
@@ -191,6 +200,7 @@ process get_software_versions {
     echo $workflow.nextflow.version > v_nextflow.txt
     fastqc --version > v_fastqc.txt
     multiqc --version > v_multiqc.txt
+    samtools --version > v_samtools.txt
     scrape_software_versions.py &> software_versions_mqc.yaml
     """
 }
@@ -218,8 +228,66 @@ process fastqc {
     """
 }
 
+if( params.bt_index ){
+    bt_indices = Channel
+        .fromPath("${params.bt_index}*", checkIfExists: true)
+        .ifEmpty { exit 1, "Bowtie2 index directory not found: " }
+      }
+// bwa_index = "${params.genomes.GRCh38.bowtie2}"
+// println(bwa_index)
+// if (bwa_index) {
+//     lastPath = bwa_index.lastIndexOf(File.separator)
+//     bwa_dir =  bwa_index.substring(0,lastPath+1)
+//     bwa_base = bwa_index.substring(lastPath+1)
+//     Channel
+//         .fromPath(bwa_dir, checkIfExists: true)
+//         .set { ch_bwa_index }
+// }
+
+
 /*
- * STEP 2 - MultiQC
+ * STEP 2 - Bowtie Alignment
+ */
+ process alignment {
+    publishDir "${params.outdir}/bowtie2", mode: 'copy'
+
+    input:
+    file indices from bt_indices.collect()
+    set name, file(reads) from ch_read_files_trimming
+
+    output:
+    file '*.bam' into bowtie_bam, bowtie_bam_for_unmapped
+
+    script:
+    index_base = indices[0].toString() - ~/.rev.\d.bt2?/ - ~/.\d.bt2?/
+    """
+    bowtie2 -x $index_base -U $reads -p ${task.cpus} \\
+    | samtools view -bS - > ${name}.bam
+    """
+
+ }
+
+ // process SamtoolsStats {
+ //     label 'cpus_2'
+ //
+ //     publishDir "${params.outdir}/Reports/${idSample}/SamToolsStats", mode: params.publishDirMode
+ //
+ //     input:
+ //         set idPatient, idSample, file(bam) from bamRecalSamToolsStats
+ //
+ //     output:
+ //         file ("${bam}.samtools.stats.out") into samtoolsStatsReport
+ //
+ //     when: !('samtools' in skipQC)
+ //
+ //     script:
+ //     """
+ //     samtools stats ${bam} > ${bam}.samtools.stats.out
+ //     """
+ // }
+
+/*
+ * STEP 3 - MultiQC
  */
 process multiqc {
     publishDir "${params.outdir}/MultiQC", mode: 'copy'
@@ -246,7 +314,7 @@ process multiqc {
 }
 
 /*
- * STEP 3 - Output Description HTML
+ * STEP 4 - Output Description HTML
  */
 process output_documentation {
     publishDir "${params.outdir}/pipeline_info", mode: 'copy'
@@ -262,6 +330,8 @@ process output_documentation {
     markdown_to_html.r $output_docs results_description.html
     """
 }
+
+
 
 /*
  * Completion e-mail notification
